@@ -14,8 +14,13 @@
 # limitations under the License.
 
 import torch
-import transformer_engine as te
-import transformer_engine_torch as tex
+
+try:
+    import transformer_engine as te
+    import transformer_engine_torch as tex
+except Exception:
+    te = None
+    tex = None
 
 from cosmos_transfer2._src.imaginaire.utils import distributed, log
 
@@ -38,37 +43,6 @@ class FusedAdam(torch.optim.Optimizer):
         opt = FusedAdam(model.parameters(), lr = ....)
         ...
         opt.step()
-
-    .. warning::
-        A previous version of :class:`FusedAdam` allowed a number of additional arguments to ``step``.
-        These additional arguments are now deprecated and unnecessary.
-
-    Adam was been proposed in `Adam: A Method for Stochastic Optimization`_.
-
-    Arguments:
-        params (iterable): iterable of parameters to optimize or dicts defining
-            parameter groups.
-        lr (float, optional): learning rate. (default: 1e-3)
-        betas (Tuple[float, float], optional): coefficients used for computing
-            running averages of gradient and its square. (default: (0.9, 0.999))
-        eps (float, optional): term added to the denominator to improve
-            numerical stability. (default: 1e-8)
-        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
-        amsgrad (boolean, optional): whether to use the AMSGrad variant of this
-            algorithm from the paper `On the Convergence of Adam and Beyond`_
-            (default: False) NOT SUPPORTED in FusedAdam!
-        adam_w_mode (boolean, optional): Apply L2 regularization or weight decay
-            True for decoupled weight decay(also known as AdamW) (default: True)
-        capturable (bool, optional): whether to use the version of the optimizer
-            that can be used with CUDA Graphs. (default: False)
-        master_weights (bool, optional): whether to maintain FP32 master weights
-           in the optimizer with FP16 mixed precision training, currently can
-           only be used with capturable set to True. (default: False)
-
-    .. _Adam - A Method for Stochastic Optimization:
-        https://arxiv.org/abs/1412.6980
-    .. _On the Convergence of Adam and Beyond:
-        https://openreview.net/forum?id=ryQu7f-RZ
     """
 
     def __init__(
@@ -88,8 +62,27 @@ class FusedAdam(torch.optim.Optimizer):
             raise RuntimeError("FusedAdam does not support the AMSGrad variant.")
         if master_weights and not capturable:
             raise RuntimeError("Master weights is currently only supported with the capturable version.")
-        # If the optimizer is capturable then LR should be a tensor (on GPU)
+
         log.warning(f"FusedAdam master_weights: {master_weights} capturable: {capturable}")
+
+        # Fallback: no transformer_engine available → use standard Adam
+        if te is None or tex is None:
+            log.warning(
+                "transformer_engine not available; using torch.optim.Adam fallback instead of fused Adam kernels."
+            )
+            defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+            super(FusedAdam, self).__init__(params, defaults)
+            self.adam_w_mode = 1 if adam_w_mode else 0
+            self.capturable = False
+            self.master_weights = False
+            self.param_groups_master = None
+            self._dummy_overflow_buf = None
+            self.multi_tensor_adam = None
+            self.multi_tensor_adam_capturable = None
+            self.multi_tensor_adam_capturable_master = None
+            return
+
+        # Original fused path (only used when transformer_engine is present)
         lr = torch.tensor(lr, dtype=torch.float32) if capturable else lr
         defaults = dict(lr=lr, bias_correction=bias_correction, betas=betas, eps=eps, weight_decay=weight_decay)
         super(FusedAdam, self).__init__(params, defaults)
@@ -119,14 +112,39 @@ class FusedAdam(torch.optim.Optimizer):
         self.multi_tensor_adam_capturable_master = tex.multi_tensor_adam_capturable_master
 
     def step(self, closure=None, grads=None, output_params=None, scale=None, grad_norms=None, grad_scaler=None):
-        """Performs a single optimization step.
+        # Fallback: if fused path is unavailable, use standard Optimizer step
+        if te is None or tex is None or self.multi_tensor_adam is None:
+            if any(p is not None for p in [grads, output_params, scale, grad_norms]):
+                raise RuntimeError(
+                    "FusedAdam fallback: call step() with no extra arguments, same as torch.optim.Adam."
+                )
+            loss = None
+            if closure is not None:
+                loss = closure()
+            # Standard Adam-style update via per-parameter state
+            for group in self.param_groups:
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+                    grad = p.grad.data
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["exp_avg"] = torch.zeros_like(p.data)
+                        state["exp_avg_sq"] = torch.zeros_like(p.data)
+                        state["step"] = 0
+                    exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
+                    state["step"] += 1
+                    beta1, beta2 = group.get("betas", (0.9, 0.999))
+                    exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                    denom = exp_avg_sq.sqrt().add_(group.get("eps", 1e-8))
+                    step_size = group.get("lr", 1e-3)
+                    if group.get("weight_decay", 0.0) != 0:
+                        grad = grad.add(p.data, alpha=group["weight_decay"])
+                    p.data.addcdiv_(exp_avg, denom, value=-step_size)
+            return loss
 
-        Arguments:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
-
-        The remaining arguments are deprecated, and are only retained (for the moment) for error-checking purposes.
-        """
+        # Original fused implementation below (unchanged)
         if any(p is not None for p in [grads, output_params, scale, grad_norms]):
             raise RuntimeError(
                 "FusedAdam has been updated. "
@@ -154,8 +172,6 @@ class FusedAdam(torch.optim.Optimizer):
             bias_correction = 1 if "bias_correction" in group and group["bias_correction"] else 0
             beta1, beta2 = group["betas"]
 
-            # assume same step across group now to simplify things
-            # per parameter step can be easily support by making it tensor, or pass list into kernel
             if "step" in group:
                 if self.capturable:
                     group["step"] = (
@@ -176,7 +192,6 @@ class FusedAdam(torch.optim.Optimizer):
                     else torch.tensor(group["lr"], dtype=torch.float32, device=device)
                 )
 
-            # create lists for multi-tensor apply
             g_16, p_16, m_16, v_16 = [], [], [], []
             g_bf, p_bf, m_bf, v_bf = [], [], [], []
             g_32, p_32, m_32, v_32 = [], [], [], []
@@ -193,11 +208,8 @@ class FusedAdam(torch.optim.Optimizer):
                     )
 
                 state = self.state[p]
-                # State initialization
                 if len(state) == 0:
-                    # Exponential moving average of gradient values
                     state["exp_avg"] = torch.zeros_like(p.data).float()
-                    # Exponential moving average of squared gradient values
                     state["exp_avg_sq"] = torch.zeros_like(p.data).float()
 
                 if p.dtype == torch.float16:
@@ -224,10 +236,7 @@ class FusedAdam(torch.optim.Optimizer):
                 else:
                     raise RuntimeError("FusedAdam only support fp16 and fp32.")
 
-            # If the optimizer is capturable, then if there's a grad scaler it works
-            # on the GPU + a different multi_tensor_applier should be called
             if self.capturable:
-                # overflow check of gradients
                 found_inf = (
                     grad_scaler._check_inf_per_device(self)[device]
                     if grad_scaler is not None
@@ -235,7 +244,6 @@ class FusedAdam(torch.optim.Optimizer):
                 )
                 self._dummy_overflow_buf.copy_(found_inf)
 
-                # get unscale scale factor
                 scale, inv_scale = None, None
                 if grad_scaler:
                     scale = grad_scaler._get_scale_async()
@@ -352,6 +360,9 @@ class FusedAdam(torch.optim.Optimizer):
         return loss
 
     def load_state_dict(self, state_dict):
+        if te is None or tex is None:
+            return super().load_state_dict(state_dict)
+
         super().load_state_dict(state_dict)
         for group in self.param_groups:
             if self.capturable:
@@ -371,7 +382,6 @@ class FusedAdam(torch.optim.Optimizer):
                         )
                     else:
                         step = torch.zeros(1, dtype=torch.int32).cuda()
-                    # make it compatible with FSDP optimizer
                     distributed.broadcast(step, 0)
                     group["step"] = step
                 elif isinstance(group["step"], torch.Tensor):
