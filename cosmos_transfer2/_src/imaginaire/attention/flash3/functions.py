@@ -24,12 +24,18 @@ Only safe to import when FLASH3_SUPPORTED is True.
 import inspect
 
 # pyrefly: ignore  # missing-import
-from flash_attn_3_nv.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+try:
+    from flash_attn_3_nv.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+except Exception:
+    flash_attn_func = None
+    flash_attn_varlen_func = None
 from torch import Tensor
 
 # NOTE: older commits didn't have `return_attn_probs` as an argument, and there is no
 # reflection of the commit hash in the version, so we have to manually inspect the signatures
-HAS_RETURN_ATTN_PROBS = "return_attn_probs" in inspect.signature(flash_attn_func).parameters
+HAS_RETURN_ATTN_PROBS = (
+    flash_attn_func is not None and "return_attn_probs" in inspect.signature(flash_attn_func).parameters
+)
 
 from cosmos_transfer2._src.imaginaire.attention.flash3.checks import flash3_attention_check
 from cosmos_transfer2._src.imaginaire.attention.masks import CausalType
@@ -103,6 +109,9 @@ def flash3_attention(
             NOTE: this tensor is not contiguous in this backend (Flash3) and it should not be made
             contiguous unless we can guarantee its results aren't merged via `merge_attentions`.
     """
+
+    if flash_attn_func is None:
+        raise ImportError("flash_attn_3_nv is not installed; flash3 attention backend unavailable.")
 
     is_varlen = cumulative_seqlen_Q is not None
     assert flash3_attention_check(

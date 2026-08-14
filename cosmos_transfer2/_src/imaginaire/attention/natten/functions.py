@@ -21,9 +21,15 @@ NATTEN Backend: intermediate APIs
 Only safe to import when NATTEN_SUPPORTED is True.
 """
 
-from natten.context import set_memory_usage_preference, use_kv_parallelism_in_fused_na
-from natten.functional import attention as _natten_attention
-from natten.functional import neighborhood_attention_generic as _natten_multi_dim_attention
+try:
+    from natten.context import set_memory_usage_preference, use_kv_parallelism_in_fused_na
+    from natten.functional import attention as _natten_attention
+    from natten.functional import neighborhood_attention_generic as _natten_multi_dim_attention
+except Exception:
+    set_memory_usage_preference = None
+    use_kv_parallelism_in_fused_na = None
+    _natten_attention = None
+    _natten_multi_dim_attention = None
 from torch import Tensor
 
 from cosmos_transfer2._src.imaginaire.attention.checks import (
@@ -39,8 +45,10 @@ from cosmos_transfer2._src.imaginaire.attention.natten.checks import (
     natten_multi_dim_attention_check,
 )
 
-set_memory_usage_preference("unrestricted")
-use_kv_parallelism_in_fused_na(True)
+if set_memory_usage_preference is not None:
+    set_memory_usage_preference("unrestricted")
+if use_kv_parallelism_in_fused_na is not None:
+    use_kv_parallelism_in_fused_na(True)
 
 
 def natten_attention(
@@ -109,6 +117,9 @@ def natten_attention(
         logsumexp (Tensor): logsumexp tensor, with the heads-last contiguous layout
             (`[batch, seqlen, heads, 1]`). Only returned when return_lse is True.
     """
+
+    if _natten_attention is None or _natten_multi_dim_attention is None:
+        raise ImportError("natten is not installed; natten attention backend unavailable.")
 
     is_varlen = cumulative_seqlen_Q is not None
     assert natten_attention_check(

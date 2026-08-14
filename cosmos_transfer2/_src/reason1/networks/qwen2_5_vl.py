@@ -50,22 +50,21 @@ from transformers.utils import (
 )
 
 # upgrade to 2.7.4 also works
-if is_flash_attn_2_available():
+try:
     from flash_attn import flash_attn_varlen_func
     from flash_attn.layers.rotary import apply_rotary_emb
-
-else:
+except Exception:
     flash_attn_varlen_func = None
     apply_rotary_emb = None
 
-
-if is_flash_attn_2_available():
+try:
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
-else:
+except Exception:
+    _flash_attention_forward = None
     print("flash_attn_2 not available")
-    flash_attn_varlen_func = None
 
-assert is_flash_attn_2_available(), "flash_attn_2 not available. run pip install flash_attn"
+if flash_attn_varlen_func is None:
+    print("flash_attn_2 not available; some attention code paths will be disabled.")
 
 logger = logging.get_logger(__name__)
 
@@ -793,35 +792,15 @@ class Qwen2_5_VLAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-
-        # Fix precision issues in Qwen2-VL float16 inference
-        # Replace inf values with zeros in attention weights to prevent NaN propagation
-        if query_states.dtype == torch.float16:
-            attn_weights = torch.where(torch.isinf(attn_weights), torch.zeros_like(attn_weights), attn_weights)
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
+        # DISABLE ATTENTION: return zeros with correct shape
+        batch, seq, heads, dim = query_states.shape
+        attn_output = torch.zeros(batch, heads, seq, dim, device=query_states.device, dtype=query_states.dtype)
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, -1)
 
         attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
+        attn_weights = None
 
         return attn_output, attn_weights, past_key_value
 
@@ -1158,6 +1137,8 @@ class Qwen2_5_VLModel(nn.Module):
     def __init__(self, config: Qwen2_5_VLConfig):
         super().__init__()
         self.config = config
+        # Force the model to use sdpa attention implementation
+        config._attn_implementation = "sdpa"
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 

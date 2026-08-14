@@ -35,15 +35,52 @@ Extra Credits:
 """
 
 import torch
-import triton
-import triton.language as tl
 from einops import rearrange
-from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_varlen_backward
+
+try:
+    import triton
+    import triton.language as tl
+    _triton_jit = triton.jit
+    _triton_autotune = triton.autotune
+    _triton_Config = triton.Config
+except Exception:
+    triton = None
+    tl = None
+
+    class _TritonConfig:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    _triton_jit = None
+    _triton_autotune = None
+    _triton_Config = _TritonConfig
+
+    def _triton_jit(*args, **kwargs):
+        def decorator(fn):
+            def _raise(*_args, **_kwargs):
+                raise ModuleNotFoundError("triton is required for flash_attention_jvp_triton but is not installed.")
+
+            return _raise
+
+        return decorator
+
+    def _triton_autotune(*args, **kwargs):
+        def decorator(fn):
+            return fn
+
+        return decorator
+
+try:
+    from flash_attn.flash_attn_interface import _flash_attn_backward, _flash_attn_varlen_backward
+except Exception:
+    _flash_attn_backward = None
+    _flash_attn_varlen_backward = None
 
 DEVICE = "cuda"
 
 
-@triton.jit
+@_triton_jit
 def _attn_fwd_inner(
     acc,
     acc_A,
@@ -157,7 +194,7 @@ def _attn_fwd_inner(
 # the code below and commenting out the equivalent parameters is convenient for
 # re-tuning.
 configs = [
-    triton.Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
+    _triton_Config({"BLOCK_M": BM, "BLOCK_N": BN}, num_stages=s, num_warps=w)
     for BM in [64, 128]
     for BN in [16, 32, 64]
     for s in [3, 4, 7]
@@ -165,8 +202,8 @@ configs = [
 ]
 
 
-@triton.autotune(configs, key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM_QK", "HEAD_DIM_V"])
-@triton.jit
+@_triton_autotune(configs, key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM_QK", "HEAD_DIM_V"])
+@_triton_jit
 def _attn_fwd(
     Q,
     K,

@@ -21,7 +21,12 @@ Flash Attention v2 (flash2) Backend: intermediate APIs
 Only safe to import when FLASH2_SUPPORTED is True.
 """
 
-from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+try:
+    from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+except Exception:
+    flash_attn_func = None
+    flash_attn_varlen_func = None
+
 from torch import Tensor
 
 from cosmos_transfer2._src.imaginaire.attention.flash2.checks import flash2_attention_check
@@ -96,6 +101,9 @@ def flash2_attention(
             NOTE: this tensor is not contiguous in this backend (Flash2) and it should not be made
             contiguous unless we can guarantee its results aren't merged via `merge_attentions`.
     """
+
+    if flash_attn_func is None:
+        raise ImportError("flash_attn is not installed; flash2 attention backend unavailable.")
 
     is_varlen = cumulative_seqlen_Q is not None
     assert flash2_attention_check(

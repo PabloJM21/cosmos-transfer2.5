@@ -14,8 +14,14 @@
 # limitations under the License.
 
 import torch
-import transformer_engine as te
-import transformer_engine_torch as tex
+import warnings
+
+try:
+    import transformer_engine as te
+    import transformer_engine_torch as tex
+except Exception:
+    te = None
+    tex = None
 
 from cosmos_transfer2._src.imaginaire.utils import distributed, log
 from cosmos_transfer2._src.imaginaire.utils.misc import get_local_tensor_if_DTensor
@@ -101,6 +107,19 @@ class FusedAdam(torch.optim.Optimizer):
 
         self.param_groups_master = None
 
+        if te is None or tex is None:
+            warnings.warn(
+                "transformer_engine not available; using torch.optim.Adam fallback instead of fused Adam kernels.",
+                UserWarning,
+            )
+            self.capturable = False
+            self.master_weights = False
+            self._dummy_overflow_buf = None
+            self.multi_tensor_adam = None
+            self.multi_tensor_adam_capturable = None
+            self.multi_tensor_adam_capturable_master = None
+            return
+
         if capturable:
             for idx, group in enumerate(self.param_groups):
                 if len(group["params"]) == 0:
@@ -136,6 +155,30 @@ class FusedAdam(torch.optim.Optimizer):
         loss = None
         if closure is not None:
             loss = closure()
+
+        if te is None or self.multi_tensor_adam is None:
+            for group in self.param_groups:
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+                    p_data = get_local_tensor_if_DTensor(p)
+                    grad = get_local_tensor_if_DTensor(p.grad).data
+                    state = self.state[p]
+                    if len(state) == 0:
+                        state["exp_avg"] = torch.zeros_like(p_data).float()
+                        state["exp_avg_sq"] = torch.zeros_like(p_data).float()
+                        state["step"] = 0
+                    exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
+                    state["step"] += 1
+                    beta1, beta2 = group.get("betas", (0.9, 0.999))
+                    exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                    denom = exp_avg_sq.sqrt().add_(group.get("eps", 1e-8))
+                    step_size = group.get("lr", 1e-3)
+                    if group.get("weight_decay", 0.0) != 0:
+                        grad = grad.add(p_data.data, alpha=group["weight_decay"])
+                    p_data.data.addcdiv_(exp_avg, denom, value=-step_size)
+            return loss
 
         if self.param_groups_master is None:
             # Create full precision master weights
@@ -362,6 +405,9 @@ class FusedAdam(torch.optim.Optimizer):
         return loss
 
     def load_state_dict(self, state_dict):
+        if te is None or tex is None:
+            return super().load_state_dict(state_dict)
+
         super().load_state_dict(state_dict)
         for group in self.param_groups:
             if self.capturable:
