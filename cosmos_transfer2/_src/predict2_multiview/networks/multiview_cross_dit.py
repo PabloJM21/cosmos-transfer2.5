@@ -32,15 +32,15 @@ from torchvision import transforms
 from cosmos_transfer2._src.imaginaire.utils import log
 from cosmos_transfer2._src.predict2.conditioner import DataType
 from cosmos_transfer2._src.predict2.networks.minimal_v1_lvg_dit import MinimalV1LVGDiT
-try:
-    from cosmos_transfer2._src.predict2.networks.minimal_v4_dit import HAS_TE
-except ImportError:
-    HAS_TE = False
 from cosmos_transfer2._src.predict2.networks.minimal_v4_dit import (
     Attention,
     Block,
     SACConfig,
 )
+try:
+    from cosmos_transfer2._src.predict2.networks.minimal_v4_dit import HAS_TE
+except ImportError:
+    HAS_TE = False
 from cosmos_transfer2._src.predict2_multiview.networks.multiview_dit import (
     MultiCameraSinCosPosEmbAxis,
     MultiCameraVideoRopePosition3DEmb,
@@ -134,13 +134,10 @@ class CrossViewAttention(Attention):
                 attn_mask_type="padding",  # important
                 attention_type="cross",  # important
             )
-        elif self.backend == "transformer_engine" and not HAS_TE:
+        else:
             # Fallback to torch backend if TE unavailable
             from cosmos_transfer2._src.predict2.networks.minimal_v4_dit import torch_attention_op
-
             self.attn_op = torch_attention_op
-        else:
-            raise NotImplementedError(f"Backend {self.backend} not supported")
         self.cross_view_attn_map = cross_view_attn_map
         self.max_neighbors = max(len(neighbors) for neighbors in cross_view_attn_map.values())
         self.neighbor_indices = None

@@ -20,7 +20,12 @@ import megatron.core.parallel_state as parallel_state
 import torch
 import torch.amp as amp
 import torch.nn as nn
-import transformer_engine as te
+try:
+    import transformer_engine as te
+    HAS_TE = hasattr(te, "pytorch")
+except Exception:
+    te = None
+    HAS_TE = False
 from einops import rearrange
 from torch.distributed import ProcessGroup, get_process_group_ranks
 from torchvision import transforms
@@ -51,8 +56,12 @@ class I2VCrossAttentionFull(Attention):
         self.k_img = nn.Linear(img_latent_dim, inner_dim, bias=False)
         self.v_img = nn.Linear(img_latent_dim, inner_dim, bias=False)
         self.q_img = nn.Linear(self._query_dim, inner_dim, bias=False)  # NEW: separate query for image attention
-        self.q_img_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)  # NEW: dedicated normalization for q_img
-        self.k_img_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        if HAS_TE:
+            self.q_img_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)  # NEW: dedicated normalization for q_img
+            self.k_img_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        else:
+            self.q_img_norm = torch.nn.RMSNorm(self.head_dim, eps=1e-6)  # NEW: dedicated normalization for q_img
+            self.k_img_norm = torch.nn.RMSNorm(self.head_dim, eps=1e-6)
 
     def init_weights(self) -> None:
         super().init_weights()
@@ -459,7 +468,10 @@ class MiniTrainDITImageContext(BaseMiniTrainDIT):
             use_wan_fp32_strategy=use_wan_fp32_strategy,
         )
 
-        self.t_embedding_norm = te.pytorch.RMSNorm(model_channels, eps=1e-6)
+        if HAS_TE:
+            self.t_embedding_norm = te.pytorch.RMSNorm(model_channels, eps=1e-6)
+        else:
+            self.t_embedding_norm = torch.nn.RMSNorm(model_channels, eps=1e-6)
 
         # Create image context projection with deep support
         if extra_image_context_dim is not None:
@@ -639,7 +651,10 @@ class MinimalV4LVGControlVaceDiT(MiniTrainDITImageContext):
                 Timesteps(self.model_channels),
                 TimestepEmbedding(self.model_channels, self.model_channels, use_adaln_lora=self.use_adaln_lora),
             )
-            self.t_embedding_norm_for_control_branch = te.pytorch.RMSNorm(self.model_channels, eps=1e-6)
+            if HAS_TE:
+                self.t_embedding_norm_for_control_branch = te.pytorch.RMSNorm(self.model_channels, eps=1e-6)
+            else:
+                self.t_embedding_norm_for_control_branch = torch.nn.RMSNorm(self.model_channels, eps=1e-6)
 
         self.build_patch_embed_vace()
 

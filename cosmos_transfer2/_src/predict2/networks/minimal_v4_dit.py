@@ -35,9 +35,8 @@ import torch
 import torch.amp as amp
 try:
     import transformer_engine as te
-
-    HAS_TE = True
-except ImportError:
+    HAS_TE = hasattr(te, "pytorch")
+except Exception:
     te = None
     HAS_TE = False
 from einops import rearrange, repeat
@@ -54,10 +53,18 @@ except ImportError:
 
 from torchvision import transforms
 
-try:
-    from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
-except ImportError:
-    from transformer_engine.pytorch.attention import apply_rotary_pos_emb
+if te is not None:
+    try:
+        from packaging.version import Version
+
+        if Version(te.__version__) >= Version("2.8.0"):
+            from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
+        else:
+            from transformer_engine.pytorch.attention import apply_rotary_pos_emb
+    except Exception:
+        apply_rotary_pos_emb = None
+else:
+    apply_rotary_pos_emb = None
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
 from cosmos_transfer2._src.imaginaire.attention import attention
@@ -457,10 +464,16 @@ class Attention(nn.Module):
         self.use_wan_fp32_strategy = use_wan_fp32_strategy
 
         self.q_proj = nn.Linear(query_dim, inner_dim, bias=False)
-        self.q_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        if HAS_TE:
+            self.q_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        else:
+            self.q_norm = torch.nn.RMSNorm(self.head_dim, eps=1e-6)
 
         self.k_proj = nn.Linear(context_dim, inner_dim, bias=False)
-        self.k_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        if HAS_TE:
+            self.k_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        else:
+            self.k_norm = torch.nn.RMSNorm(self.head_dim, eps=1e-6)
 
         self.v_proj = nn.Linear(context_dim, inner_dim, bias=False)
         self.v_norm = nn.Identity()
@@ -591,7 +604,10 @@ class I2VCrossAttention(Attention):
         inner_dim = self.head_dim * self.n_heads
         self.k_img = nn.Linear(img_latent_dim, inner_dim, bias=False)
         self.v_img = nn.Linear(img_latent_dim, inner_dim, bias=False)
-        self.k_img_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        if HAS_TE:
+            self.k_img_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        else:
+            self.k_img_norm = torch.nn.RMSNorm(self.head_dim, eps=1e-6)
 
     def init_weights(self) -> None:
         super().init_weights()
@@ -1559,7 +1575,10 @@ class MiniTrainDIT(WeightTrainingStat):
             use_wan_fp32_strategy=self.use_wan_fp32_strategy,
         )
 
-        self.t_embedding_norm = te.pytorch.RMSNorm(model_channels, eps=1e-6)
+        if HAS_TE:
+            self.t_embedding_norm = te.pytorch.RMSNorm(model_channels, eps=1e-6)
+        else:
+            self.t_embedding_norm = torch.nn.RMSNorm(model_channels, eps=1e-6)
         if extra_image_context_dim is not None:
             self.img_context_proj = nn.Sequential(
                 nn.Linear(
