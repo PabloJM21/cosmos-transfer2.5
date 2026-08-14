@@ -32,6 +32,10 @@ from torchvision import transforms
 from cosmos_transfer2._src.imaginaire.utils import log
 from cosmos_transfer2._src.predict2.conditioner import DataType
 from cosmos_transfer2._src.predict2.networks.minimal_v1_lvg_dit import MinimalV1LVGDiT
+try:
+    from cosmos_transfer2._src.predict2.networks.minimal_v4_dit import HAS_TE
+except ImportError:
+    HAS_TE = False
 from cosmos_transfer2._src.predict2.networks.minimal_v4_dit import (
     Attention,
     Block,
@@ -118,7 +122,7 @@ class CrossViewAttention(Attention):
     def __init__(self, *args, cross_view_attn_map: Dict[int, List[int]], **kwargs):
         super().__init__(*args, **kwargs)
         del self.attn_op
-        if self.backend == "transformer_engine":
+        if self.backend == "transformer_engine" and HAS_TE:
             from transformer_engine.pytorch.attention import DotProductAttention
 
             self.attn_op = DotProductAttention(
@@ -130,6 +134,11 @@ class CrossViewAttention(Attention):
                 attn_mask_type="padding",  # important
                 attention_type="cross",  # important
             )
+        elif self.backend == "transformer_engine" and not HAS_TE:
+            # Fallback to torch backend if TE unavailable
+            from cosmos_transfer2._src.predict2.networks.minimal_v4_dit import torch_attention_op
+
+            self.attn_op = torch_attention_op
         else:
             raise NotImplementedError(f"Backend {self.backend} not supported")
         self.cross_view_attn_map = cross_view_attn_map

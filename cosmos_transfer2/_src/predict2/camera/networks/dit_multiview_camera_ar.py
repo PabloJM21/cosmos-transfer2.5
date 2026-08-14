@@ -24,7 +24,13 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.amp as amp
-import transformer_engine as te
+try:
+    import transformer_engine as te
+
+    HAS_TE = True
+except ImportError:
+    te = None
+    HAS_TE = False
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import nn
@@ -364,7 +370,7 @@ class Attention(nn.Module):
         self.output_proj = nn.Linear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
 
-        if self.backend == "transformer_engine":
+        if self.backend == "transformer_engine" and HAS_TE:
             from transformer_engine.pytorch.attention import DotProductAttention
 
             self.attn_op = DotProductAttention(
@@ -377,7 +383,7 @@ class Attention(nn.Module):
             )
         elif self.backend == "minimal_a2a":
             self.attn_op = MinimalA2AAttnOp()
-        elif self.backend == "torch":
+        elif self.backend == "torch" or (self.backend == "transformer_engine" and not HAS_TE):
             self.attn_op = torch_attention_op
 
         self._query_dim = query_dim
