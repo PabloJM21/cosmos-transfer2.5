@@ -28,6 +28,7 @@ from cosmos_transfer2._src.imaginaire.auxiliary.guardrail.common.core import (
     GUARDRAIL1_CHECKPOINT,
     GuardrailRunner,
     PostprocessingGuardrail,
+    resolve_guardrail_subdir,
 )
 from cosmos_transfer2._src.imaginaire.auxiliary.guardrail.common.io_utils import (
     get_video_filepaths,
@@ -64,7 +65,9 @@ class RetinaFaceFilter(PostprocessingGuardrail):
             confidence_threshold: Minimum confidence score to consider a face detection
             offload_model_to_cpu (bool, optional): Whether to offload the model to CPU. Defaults to True.
         """
-        self.checkpoint = f"{GUARDRAIL1_CHECKPOINT.download()}/face_blur_filter/Resnet50_Final.pth"
+        downloaded_root = GUARDRAIL1_CHECKPOINT.download()
+        face_blur_dir = resolve_guardrail_subdir(downloaded_root, "face_blur_filter")
+        self.checkpoint = os.path.join(face_blur_dir, "Resnet50_Final.pth")
         self.cfg = cfg_re50
         self.batch_size = batch_size
         self.confidence_threshold = confidence_threshold
