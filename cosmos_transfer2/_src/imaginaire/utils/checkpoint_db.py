@@ -46,6 +46,7 @@ checkpoint_uri = get_checkpoint_uri("0e8177cc-0db5-4cfd-a8a4-b820c772f4fc")
 # Local path
 checkpoint_uri = get_checkpoint_uri("/path/to/checkpoint", check_exists=True)
 ```
+
 When the checkpoint is loaded, call 'download_checkpoint':
 
 ```python
@@ -63,7 +64,6 @@ load_checkpoint(checkpoint_uri)
 import functools
 import os
 import shlex
-import shutil
 import subprocess
 import uuid
 from abc import ABC, abstractmethod
@@ -86,6 +86,7 @@ def _is_uuid(checkpoint_uri: str) -> bool:
         return True
     except ValueError:
         return False
+
 
 def _is_path(checkpoint_uri: str) -> bool:
     """Return True if the URI is a local path."""
@@ -145,11 +146,16 @@ class CheckpointFileS3(_CheckpointS3):
 class CheckpointDirS3(_CheckpointS3):
     """Config for checkpoint directory on S3."""
 
+
 CheckpointS3: TypeAlias = CheckpointFileS3 | CheckpointDirS3
 
 
 def _find_checkpoint_in_dir(local_dir: str) -> str:
-    """Resolve a downloaded Hugging Face snapshot directory to a checkpoint file."""
+    """Resolve a downloaded Hugging Face snapshot directory to a checkpoint file or directory.
+    
+    For sharded models (e.g., model-00001-of-00004.safetensors), returns the directory.
+    For single-file models, returns the specific checkpoint file.
+    """
     candidates = []
     for root, _, files in os.walk(local_dir):
         for file in files:
@@ -160,6 +166,13 @@ def _find_checkpoint_in_dir(local_dir: str) -> str:
         raise FileNotFoundError(
             f"No checkpoint file found inside downloaded HF snapshot directory: {local_dir}"
         )
+    
+    # Check if this is a sharded model (e.g., model-00001-of-00004.safetensors)
+    sharded_files = [c for c in candidates if "-of-" in os.path.basename(c)]
+    if sharded_files:
+        log.info(f"Detected sharded model with {len(sharded_files)} shards; returning directory: {local_dir}")
+        return local_dir
+    
     if len(candidates) == 1:
         return candidates[0]
 
@@ -189,76 +202,72 @@ def _find_checkpoint_in_dir(local_dir: str) -> str:
 def _hf_download(cmd_args: list[str]) -> str:
     """Run Hugging Face CLI download command and return the local path.
 
-    Uses a newer Hugging Face CLI version to download checkpoint. If `uvx` is
-    unavailable, falls back to `huggingface_hub.snapshot_download`.
+    Uses a newer Hugging Face CLI version to download checkpoint. The dependency
+    version is very old and not robust.
     """
+    # Primary (preferred) path: try the project's `uvx` wrapper which selects
+    # a compatible Hugging Face CLI. This may not exist on HPC clusters.
     cmd = [
         "uvx",
         f"hf>={_MINIMUM_HF_CLI_VERSION}",
         "download",
         *cmd_args,
     ]
-
-    # Prefer uvx-based CLI download when available.
-    if shutil.which("uvx") is not None:
-        log.info(f"{shlex.join(cmd)}")
+    log.info(f"Attempting HF download via: {shlex.join(cmd)}")
+    try:
         subprocess.check_call(cmd, text=True)
         return subprocess.check_output([*cmd, "--quiet"], text=True, env=dict(os.environ) | {"HF_HUB_OFFLINE": "1"}).strip()
+    except FileNotFoundError:
+        log.warning("'uvx' not found on PATH; falling back to huggingface_hub Python API.")
+    except subprocess.CalledProcessError as e:
+        log.warning(f"'uvx' download failed: {e}; falling back to huggingface_hub Python API.")
 
-    # Fallback: use huggingface_hub if installed.
+    # Fallback: attempt to use huggingface_hub.snapshot_download() if available.
+    # Parse cmd_args for repository, revision and include/exclude patterns (best-effort).
     try:
         from huggingface_hub import snapshot_download
-    except Exception as e:
-        log.warning(f"huggingface_hub import failed: {e}")
-    else:
+    except Exception:
+        snapshot_download = None
+
+    if snapshot_download is not None:
         try:
-            repo = cmd_args[0] if cmd_args else None
+            # Extract repo and revision
+            repo = cmd_args[0]
             rev = None
             include = None
             exclude = None
-
-            i = 0
-            while i < len(cmd_args):
-                a = cmd_args[i]
+            # locate --revision, --include, --exclude
+            for i, a in enumerate(cmd_args):
                 if a == "--revision" and i + 1 < len(cmd_args):
                     rev = cmd_args[i + 1]
                 if a == "--include" and i + 1 < len(cmd_args):
-                    include = []
+                    includes = []
                     j = i + 1
                     while j < len(cmd_args) and not cmd_args[j].startswith("--"):
-                        include.append(cmd_args[j])
+                        includes.append(cmd_args[j])
                         j += 1
+                    include = includes or None
                 if a == "--exclude" and i + 1 < len(cmd_args):
-                    exclude = []
+                    excludes = []
                     j = i + 1
                     while j < len(cmd_args) and not cmd_args[j].startswith("--"):
-                        exclude.append(cmd_args[j])
+                        excludes.append(cmd_args[j])
                         j += 1
-                i += 1
+                    exclude = excludes or None
 
-            # For file download, the last arg may be a filename.
+            # For file download, the last arg may be a filename
             filename = None
             if len(cmd_args) >= 1 and not cmd_args[-1].startswith("--"):
                 cand = cmd_args[-1]
                 if "." in cand:
                     filename = cand
 
-            log.info(
-                f"Using huggingface_hub.snapshot_download(repo={repo}, rev={rev}, include={include}, exclude={exclude})"
-            )
-            local_dir = snapshot_download(
-                repo_id=repo,
-                revision=rev or "main",
-                allow_patterns=include,
-                ignore_patterns=exclude,
-                repo_type="model",
-            )
+            log.info(f"Using huggingface_hub.snapshot_download(repo={repo}, rev={rev}, include={include}, exclude={exclude})")
+            local_dir = snapshot_download(repo_id=repo, revision=rev or "main", allow_patterns=include, ignore_patterns=exclude, repo_type="model")
             if filename:
                 path = os.path.join(local_dir, filename)
                 if not os.path.exists(path) and os.path.isdir(local_dir):
-                    log.warning(
-                        f"Expected checkpoint file {path} not found; resolving checkpoint file inside {local_dir}"
-                    )
+                    log.warning(f"Expected checkpoint file {path} not found; resolving checkpoint file inside {local_dir}")
                     path = _find_checkpoint_in_dir(local_dir)
             else:
                 path = local_dir
@@ -287,6 +296,7 @@ class _CheckpointHf(_CheckpointUri, ABC):
 
     _path: str | None = None
     """Local path."""
+
     @abstractmethod
     def _download(self) -> str: ...
 
@@ -326,6 +336,7 @@ class CheckpointDirHf(_CheckpointHf):
     """Repository subdirectory."""
     include: tuple[str, ...] = ()
     """Include patterns.
+
     See https://huggingface.co/docs/huggingface_hub/en/guides/download#filter-files-to-download
     """
     exclude: tuple[str, ...] = ()
@@ -425,6 +436,7 @@ class CheckpointConfig(pydantic.BaseModel):
         """Register checkpoint config."""
         register_checkpoint(self)
 
+
 _CHECKPOINTS: dict[str, CheckpointConfig] = {}
 """Mapping from checkpoint URI to checkpoint config."""
 
@@ -444,6 +456,7 @@ def register_checkpoint(checkpoint_config: CheckpointConfig):
         if uri in _CHECKPOINTS:
             raise ValueError(f"Checkpoint '{uri}' already registered.")
         _CHECKPOINTS[uri] = checkpoint_config
+
 
 def get_checkpoint_uri(checkpoint_uri: str, *, check_exists: bool = False) -> str:
     """Validate and normalize checkpoint URI."""
