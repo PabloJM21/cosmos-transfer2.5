@@ -25,6 +25,7 @@ from cosmos_transfer2._src.imaginaire.auxiliary.guardrail.common.core import (
     GUARDRAIL1_CHECKPOINT,
     ContentSafetyGuardrail,
     GuardrailRunner,
+    resolve_guardrail_subdir,
 )
 from cosmos_transfer2._src.imaginaire.auxiliary.guardrail.common.io_utils import get_video_filepaths, read_video
 from cosmos_transfer2._src.imaginaire.auxiliary.guardrail.video_content_safety_filter.model import (
@@ -62,7 +63,8 @@ class VideoContentSafetyFilter(ContentSafetyGuardrail):
         """
         self.offload_model = offload_model_to_cpu
         self.dtype = torch.float32
-        self.checkpoint_dir = os.path.join(GUARDRAIL1_CHECKPOINT.download(), "video_content_safety_filter")
+        downloaded_root = GUARDRAIL1_CHECKPOINT.download()
+        self.checkpoint_dir = resolve_guardrail_subdir(downloaded_root, "video_content_safety_filter")
 
         # Use ModelConfig directly for inference configuration
         model_config = ModelConfig(input_size=1152, num_classes=7)

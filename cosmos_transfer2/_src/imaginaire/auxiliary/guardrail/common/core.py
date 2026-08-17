@@ -15,8 +15,10 @@
 
 from typing import Any
 
+import os
 import numpy as np
 
+from ..nltk_patch import _validate_path  # noqa: F401
 from cosmos_transfer2._src.imaginaire.utils import log
 from cosmos_transfer2._src.imaginaire.utils.checkpoint_db import (
     CheckpointDirHf,
@@ -26,6 +28,39 @@ GUARDRAIL1_CHECKPOINT = CheckpointDirHf(
     repository="nvidia/Cosmos-Guardrail1",
     revision="d6d4bfa899a71454a700907664f3e88f503950cf",
 )
+
+
+def resolve_guardrail_subdir(root_dir: str, subdir: str) -> str:
+    """Resolve a guardrail subdirectory path inside a downloaded checkpoint root.
+
+    The downloaded root may point to a nested snapshot subdirectory when the repository
+    contains nested model references. This helper searches both the current root and
+    ascends parent directories if needed.
+    """
+    root_dir = os.path.abspath(root_dir)
+    if os.path.isfile(root_dir):
+        root_dir = os.path.dirname(root_dir)
+
+    current_dir = root_dir
+    visited = set()
+    while current_dir not in visited:
+        visited.add(current_dir)
+        candidate = os.path.join(current_dir, subdir)
+        if os.path.isdir(candidate):
+            return candidate
+
+        for dirpath, dirnames, _ in os.walk(current_dir):
+            if subdir in dirnames:
+                return os.path.join(dirpath, subdir)
+
+        parent_dir = os.path.dirname(current_dir)
+        if parent_dir == current_dir:
+            break
+        current_dir = parent_dir
+
+    raise FileNotFoundError(
+        f"Could not locate guardrail subdirectory '{subdir}' under downloaded checkpoint root '{root_dir}'."
+    )
 
 
 class ContentSafetyGuardrail:

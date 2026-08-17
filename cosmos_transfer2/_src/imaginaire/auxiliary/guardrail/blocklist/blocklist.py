@@ -27,6 +27,7 @@ from cosmos_transfer2._src.imaginaire.auxiliary.guardrail.common.core import (
     GUARDRAIL1_CHECKPOINT,
     ContentSafetyGuardrail,
     GuardrailRunner,
+    resolve_guardrail_subdir,
 )
 from cosmos_transfer2._src.imaginaire.utils import log, misc
 
@@ -46,8 +47,10 @@ class Blocklist(ContentSafetyGuardrail):
             guardrail_partial_match_min_chars (int, optional): Minimum number of characters in a word to check for partial match. Defaults to 6.
             guardrail_partial_match_letter_count (float, optional): Maximum allowed difference in characters for partial match. Defaults to 0.4.
         """
-        self.checkpoint_dir = os.path.join(GUARDRAIL1_CHECKPOINT.download(), "blocklist")
-        nltk.data.path.append(os.path.join(self.checkpoint_dir, "nltk_data"))
+        downloaded_root = GUARDRAIL1_CHECKPOINT.download()
+        self.checkpoint_dir = resolve_guardrail_subdir(downloaded_root, "blocklist")
+        nltk_data_path = os.path.realpath(os.path.join(self.checkpoint_dir, "nltk_data"))
+        nltk.data.path.append(nltk_data_path)
         self.lemmatizer = nltk.WordNetLemmatizer()
         self.profanity = profanity
         self.guardrail_partial_match_min_chars = guardrail_partial_match_min_chars
@@ -207,7 +210,13 @@ class Blocklist(ContentSafetyGuardrail):
             return False, message
 
         # Check lemmatized words for censored words
-        tokens = nltk.word_tokenize(input_prompt)
+        try:
+            tokens = nltk.word_tokenize(input_prompt)
+        except (PermissionError, OSError) as e:
+            # NLTK security checks may reject HF cache paths; fall back to simple tokenizer
+            log.warning(f"NLTK tokenizer failed ({type(e).__name__}); using simple fallback tokenizer")
+            tokens = input_prompt.lower().split()
+        
         lemmas = [self.lemmatizer.lemmatize(token) for token in tokens]
         lemmatized_prompt = " ".join(lemmas)
         censored, message = self.censor_prompt(lemmatized_prompt)
